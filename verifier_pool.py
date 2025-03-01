@@ -79,7 +79,7 @@ def verify_sample_format(sample: dict) -> float:
     completion = sample['sample_text']
     try:
     # add synthetic <think> as its already part of the prompt and prefilled for the assistant to more easily match the regex
-        completion = "<think>" + completion
+        completion = completion.split("Let me solve this step by step.\n")[1].split("<|im_end|>")[0]
         
         # Check if the format is correct
         regex = r"^<think>([^<]*(?:<(?!/?think>)[^<]*)*)<\/think>\n<answer>([\s\S]*?)<\/answer>$"
@@ -103,7 +103,7 @@ def verify_sample_equation(sample: dict) -> float:
     numbers = sample['nums']
     try:
         # add synthetic <think> as its already part of the prompt and prefilled for the assistant to more easily match the regex
-        completion = "<think>" + completion
+        completion = completion.split("Let me solve this step by step.\n")[1].split("<|im_end|>")[0]
         # Check if the format is correct
         match = re.search(r"<answer>(.*?)<\/answer>", completion)
         if match is None:
