@@ -206,6 +206,8 @@ class VerifierPool:
         equation_future = asyncio.create_task(self._verify_balanced(sample, 'equation'))
         format_result = await format_future
         equation_result = await equation_future
+        sample['reward_format'] = format_result['reward_format']
+        sample['reward_equation'] = equation_result['reward_equation']
         sample['reward'] = format_result['reward_format'] + equation_result['reward_equation']
         return sample
 
