@@ -199,6 +199,7 @@ async def train(args,
         for step in range(num_batches_per_ref_model_update):
             start_time = time.time()
             batch = next(dataloader)
+            torch.distributed.barrier()
             await batcher_actor.generate_experience.remote(
                 batch,
                 samples_per_question,
@@ -214,6 +215,8 @@ async def train(args,
             samples_in_batch = 0
             reward_accumulated_in_batch = 0
             output_tokens_in_batch = 0
+            format_reward_accumulated_in_batch = 0
+            equation_reward_accumulated_in_batch = 0
             async for minibatch in remote_queue_batch_generator(args.global_rank, 
                                                                 device,
                                                                 batcher_actor_name=args.experience_batcher_name):
@@ -227,13 +230,15 @@ async def train(args,
                 # Gradient scaling divides by the total number of samples in the batch across all GPUs.
                 loss *= int(os.environ["WORLD_SIZE"])
 
-                total_num_output_tokens, total_num_samples, total_reward = map(
+                total_num_output_tokens, total_num_samples, total_reward, total_reward_format, total_reward_equation = map(
                     lambda x: x.item(),
                     accelerator.reduce(
                         torch.tensor([
                             minibatch["num_output_tokens"],
                             minibatch["num_samples"],
-                            minibatch["total_reward_rank"]
+                            minibatch["total_reward_rank"],
+                            minibatch["reward_format"],
+                            minibatch["reward_equation"],
                         ], device=accelerator.device),
                         reduction="sum"
                     )
@@ -256,6 +261,8 @@ async def train(args,
                 reward_accumulated_in_batch += total_reward
                 samples_in_batch += total_num_samples
                 output_tokens_in_batch += total_num_output_tokens
+                format_reward_accumulated_in_batch += total_reward_format
+                equation_reward_accumulated_in_batch += total_reward_equation
                 torch.cuda.empty_cache()
             # Always take a gradient step before updating vLLM workers
             take_gradient_step(model, optimizer, lr_scheduler, accelerator, samples_in_batch)
@@ -263,6 +270,8 @@ async def train(args,
                 print(
                     f"\033[1;38;2;255;0;255mAverage Reward Accumulated in Batch:\033[0m {reward_accumulated_in_batch/samples_in_batch} \033[1;38;2;255;0;255m samples trained on:\033[0m {total_samples_accumulated}\n"
                     f"\033[1;38;2;255;0;255mAverage Output Tokens in Batch:\033[0m {output_tokens_in_batch/samples_in_batch} \033[1;38;2;255;0;255m samples trained on:\033[0m {total_samples_accumulated}\n"
+                    f"\033[1;38;2;255;0;255mAverage Format Reward Accumulated in Batch:\033[0m {format_reward_accumulated_in_batch/samples_in_batch} \033[1;38;2;255;0;255m samples trained on:\033[0m {total_samples_accumulated}\n"
+                    f"\033[1;38;2;255;0;255mAverage Equation Reward Accumulated in Batch:\033[0m {equation_reward_accumulated_in_batch/samples_in_batch} \033[1;38;2;255;0;255m samples trained on:\033[0m {total_samples_accumulated}\n"
                     f"\033[1;38;2;255;0;255mTime taken for batch:\033[0m {time.time() - start_time:.2f} seconds\n"
                     f"\033[1;38;2;255;0;255mNum samples in batch:\033[0m {samples_in_batch}\n"
                     f"\033[1;38;2;255;0;255mLearning Rate:\033[0m {lr_scheduler.get_last_lr()}\n"
@@ -272,10 +281,11 @@ async def train(args,
                 save_model(args, model, accelerator, total_samples_accumulated)
                 last_saved_samples = total_samples_accumulated
             
-            # torch.distributed.breakpoint()
-            update_vllm_worker_weights(policy_model, accelerator, registry_actor_names=["generation_vllm_registry"])
+            #update both logprob and generation workers at the last step of the ref model update loop
+            registry_actor_names = ["generation_vllm_registry", "logprob_vllm_registry"] if step == num_batches_per_ref_model_update - 1 else ["generation_vllm_registry"]
+            update_vllm_worker_weights(policy_model, accelerator, registry_actor_names=registry_actor_names)
         
-        update_vllm_worker_weights(policy_model, accelerator, registry_actor_names=["logprob_vllm_registry"])
+        # update_vllm_worker_weights(policy_model, accelerator, registry_actor_names=["logprob_vllm_registry"])
             
 
 
@@ -286,7 +296,8 @@ if __name__ == "__main__":
     # Model and Tokenizer
     parser.add_argument(
         "--model_name_or_path",
-        default="/dev/shm/qwen7b-math-base",
+        # default="/dev/shm/qwen7b-math-base",
+        default="/dev/shm/qwen-2.5-3b-instruct",
         # default="Qwen/Qwen2.5-Math-7B",
         # default="/dev/shm/phi-4",
         type=str,
@@ -306,7 +317,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--batch_size",
         type=int,
-        default=256, #TODO: change to 32 for a real experiment
+        default=56, #TODO: change to 32 for a real experiment
         help="Global batch size of questions per gradient step. The batch will be split among GPUs even if not divisible by the number of GPUs."
     )
 
@@ -320,7 +331,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--num_warmup_steps",
         type=int,
-        default=40,
+        default=13,
         help="Number of warmup steps for the scheduler."
     )
 
@@ -342,7 +353,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--max_tokens_per_gpu",
         type=int,
-        default=26000,
+        default=32000,
         help="Maximum number of tokens per GPU."
     )
 
@@ -350,7 +361,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--temperature",
         type=float,
-        default=1.0,
+        default=0.9,
         help="Sampling temperature for generating experience."
     )
 
@@ -358,21 +369,22 @@ if __name__ == "__main__":
         "--data_path",
         type=str,
         # default="/new_data/aldo/v1_reasoning/grpobk/limo_data_cleaned_phi_4_format.jsonl",
-        default="/new_data/aldo/v1_reasoning/math_simplerl_qwen_data_token_ids.jsonl",
+        # default="/new_data/aldo/v1_reasoning/math_simplerl_qwen_data_token_ids.jsonl",
+        default="/new_data/aldo/v1_reasoning/grpo_feb_24th/countdown.jsonl",
         help="Path to the data file."
     )
 
     parser.add_argument(
         "--min_samples_per_checkpoint",
         type=int,
-        default=64000,
+        default=100000,
         help="Minimum number of samples per checkpoint."
     )
 
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="/new_data/experiments_rh/simple_r1_replica_v2",
+        default="/new_data/experiments_rh/countdown_3b_qwen",
         help="Output directory where model checkpoints and configuration files will be saved."
     )
 
@@ -388,15 +400,21 @@ if __name__ == "__main__":
             model, 
             optimizer,
             lr_scheduler,
-            samples_per_question=64, 
-            kl_coeff=0.04,
+            samples_per_question=8, 
+            kl_coeff=0.01,
             accelerator=accelerator,
             num_iterations=100000,
-            num_batches_per_ref_model_update=10,
+            num_batches_per_ref_model_update=5,
         )
     )
 
 '''
-# torchrun --nproc_per_node=8 --master_port=12345 trainer_core.py
+torchrun --nproc_per_node=8 trainer_core.py 2>&1 | tee ~/grpo/train_countdown_3b.log
 CUDA_VISIBLE_DEVICES=4,5,6,7 torchrun --nproc_per_node=4 --master_port=12345 trainer_core.py 2>&1 | tee train_qwen.log
+set -x rank 0
+set -Ux NCCL_SOCKET_IFNAME eth1
+set -Ux NCCL_IB_DISABLE 1
+mkdir -p ~/grpo
+torchrun --nnodes=1 --node_rank=$rank --nproc_per_node=8 --rdzv_id=101 \
+    --rdzv_endpoint="10.241.128.17:54367" trainer_core.py 2>&1 | tee ~/grpo/train_countdown_3b.log
 '''

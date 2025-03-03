@@ -168,6 +168,8 @@ def post_process_batch(batched_questions, device):
         "num_output_tokens": torch.tensor(output_lens.sum(), device=device, dtype=torch.float32),
         "num_samples": torch.tensor(len(batched_questions), device=device, dtype=torch.float32),
         # "output_mask": output_mask[:,1:].contiguous(),
+        "reward_format": torch.tensor(sum([s['reward_format'] for s in batched_questions]), device=device, dtype=torch.float32),
+        "reward_equation": torch.tensor(sum([s['reward_equation'] for s in batched_questions]), device=device, dtype=torch.float32),
         "samples": batched_questions,
         "labels": labels,
         "total_reward_rank": torch.tensor(sum([s['reward'] for s in batched_questions]), device=device, dtype=torch.float32),

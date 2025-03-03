@@ -65,6 +65,19 @@ class BaseVLLMWorker:
         self.llm = AsyncLLMEngine.from_engine_args(self.engine_args)
         atexit.register(lambda: asyncio.get_event_loop().create_task(self._async_cleanup()))
     
+    def init_weight_update_group(self, master_address, master_port,
+                                 rank_offset, world_size):
+        # from vllm.distributed.parallel_state import get_world_group
+        from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
+        from vllm.distributed.utils import StatelessProcessGroup
+        pg = StatelessProcessGroup.create(
+            host=master_address,
+            port=master_port,
+            rank=1,
+            world_size=2,
+        )
+        self.model_update_group = PyNcclCommunicator(pg, device=self.device)
+    
     def get_engine_args(self, model_path: str, tensor_parallel_size: int, max_num_seqs: int) -> AsyncEngineArgs:
         raise NotImplementedError("Subclasses must implement get_engine_args method.")
     
@@ -122,7 +135,7 @@ class BaseVLLMWorker:
             traceback.print_exc()
             raise e
 
-@ray.remote
+# @ray.remote
 class GenerationVLLMWorker(BaseVLLMWorker):
     def __init__(self, model_path: str, worker_id: str, tensor_parallel_size: int, max_num_seqs: int,
                  global_num_verifiers: int = 4, write_failed: bool = False):
@@ -135,6 +148,7 @@ class GenerationVLLMWorker(BaseVLLMWorker):
     def get_engine_args(self, model_path: str, tensor_parallel_size: int, max_num_seqs: int) -> AsyncEngineArgs:
         from transformers import AutoConfig
         config = AutoConfig.from_pretrained(model_path)
+        print(f"\033[1;38;2;255;0;0m _get_engine_args line 138: \033[0m roll back to max_model_len!!!!")
         return AsyncEngineArgs(
             model=model_path,
             tensor_parallel_size=tensor_parallel_size,
@@ -142,7 +156,8 @@ class GenerationVLLMWorker(BaseVLLMWorker):
             dtype=torch.bfloat16,
             enable_prefix_caching=True,
             max_num_seqs=max_num_seqs,
-            max_model_len=config.max_position_embeddings,
+            # max_model_len=config.max_position_embeddings,
+            max_model_len=4096,
         )
     
     async def inference(self, sample: dict, max_new_tokens: int = None, **kwargs) -> list[dict]:
@@ -171,7 +186,9 @@ class GenerationVLLMWorker(BaseVLLMWorker):
             sample['sample_text'] = self.tokenizer.decode(sample['sample_ids'])
             sample['sample_position_ids'] = list(range(len(sample['sample_ids'])))
             # Use the remote call because verifier_pool is now a ray actor
+            # sample['reward'] = float(len(sample['output_token_ids']))
             sample_rewards_futures.append(self.verifier_pool.verify_balanced.remote(sample))
+        # print("\033[1;38;5;196mDEBUG: assign rewards from the verifier!\033[0m")
 
         samples = await asyncio.gather(*sample_rewards_futures)
         group_rewards = np.array([s['reward'] for s in samples])
