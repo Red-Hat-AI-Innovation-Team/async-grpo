@@ -90,7 +90,7 @@ async def rewrite_with_insert_phrase(sample, tokenizer):
     original_output = full_text.split(sample['input'])[-1]
     modified_output, delimiter_not_found = insert_phrase(original_output, delimiter, special_phrases, tokenizer.eos_token)
     sample['input'] = sample['input'] + modified_output
-    sample['input_token_ids'] = tokenizer.encode(sample['input'])
+    sample['input_token_ids'] = tokenizer.encode(sample['input'], add_bos_token=False)
     sample['delimiter_not_found'] = delimiter_not_found
     return sample
 
@@ -128,6 +128,7 @@ class BaseVLLMWorker:
         print(f"Initializing {self.__class__.__name__} with model path: {model_path}")
         self.engine_args = self.get_engine_args(model_path, tensor_parallel_size, max_num_seqs)
         self.tokenizer = AutoTokenizer.from_pretrained(model_path)
+        self.tokenizer.add_bos_token = False
         self.llm = AsyncLLMEngine.from_engine_args(self.engine_args)
         atexit.register(lambda: asyncio.get_event_loop().create_task(self._async_cleanup()))
     
@@ -250,45 +251,46 @@ class GenerationVLLMWorker(BaseVLLMWorker):
             sample_rewards_futures.append(self.verifier_pool.verify_balanced.remote(sample))
         logging.debug(f"\033[1;38;2;255;165;0mFirst sample before rewriting: \033[0m {samples[0]['sample_text']}")
 
-        modified_samples = [deepcopy(sample) for sample in samples]
-        modified_samples = await asyncio.gather(*[rewrite_with_insert_phrase(sample, self.tokenizer) for sample in modified_samples])
-        logging.debug(f"\033[1;38;2;255;165;0mFirst sample after rewriting: \033[0m {modified_samples[0]['input']}")
+        # modified_samples = [deepcopy(sample) for sample in samples]
+        # modified_samples = await asyncio.gather(*[rewrite_with_insert_phrase(sample, self.tokenizer) for sample in modified_samples])
+        # logging.debug(f"\033[1;38;2;255;165;0mFirst sample after rewriting: \033[0m {modified_samples[0]['input']}")
         
-        kwargs['n'] = 1
-        modified_requests_out = await asyncio.gather(*[
-            super().inference(s, 
-                              **self.get_gen_kwargs(
-                                  s, 
-                                  include_stop_str_in_output=False, 
-                                  **kwargs)) 
-            for s in modified_samples])
+        # kwargs['n'] = 1
+        # modified_requests_out = await asyncio.gather(*[
+        #     super().inference(s, 
+        #                       **self.get_gen_kwargs(
+        #                           s, 
+        #                           include_stop_str_in_output=False, 
+        #                           **kwargs)) 
+        #     for s in modified_samples])
         
-        modified_rewards_futures = []
-        for modified_sample, sample, out in zip(modified_samples, samples, modified_requests_out):
-            modified_sample['input'] = sample['input'] #original input
-            modified_sample['sample_ids'] = modified_sample['input_token_ids'] + list(out.outputs[0].token_ids)
-            modified_sample['input_token_ids'] = sample['input_token_ids'] #original input token ids
-            modified_sample['output_token_ids'] = modified_sample['sample_ids'][len(modified_sample['input_token_ids']):]
-            modified_sample['output_len'] = len(modified_sample['output_token_ids'])
-            modified_sample['sample_text'] = self.tokenizer.decode(modified_sample['sample_ids'])
-            modified_sample['sample_position_ids'] = list(range(len(modified_sample['sample_ids'])))
-            # Use the remote call because verifier_pool is now a ray actor
-            modified_rewards_futures.append(self.verifier_pool.verify_balanced.remote(modified_sample))
-        logging.debug(f"\033[1;38;2;255;165;0mFirst sample after generating with rewritten input: \033[0m {modified_samples[0]['sample_text']}")
+        # modified_rewards_futures = []
+        # for modified_sample, sample, out in zip(modified_samples, samples, modified_requests_out):
+        #     modified_sample['input'] = sample['input'] #original input
+        #     modified_sample['sample_ids'] = modified_sample['input_token_ids'] + list(out.outputs[0].token_ids)
+        #     modified_sample['input_token_ids'] = sample['input_token_ids'] #original input token ids
+        #     modified_sample['output_token_ids'] = modified_sample['sample_ids'][len(modified_sample['input_token_ids']):]
+        #     modified_sample['output_len'] = len(modified_sample['output_token_ids'])
+        #     modified_sample['sample_text'] = self.tokenizer.decode(modified_sample['sample_ids'])
+        #     modified_sample['sample_position_ids'] = list(range(len(modified_sample['sample_ids'])))
+        #     # Use the remote call because verifier_pool is now a ray actor
+        #     modified_rewards_futures.append(self.verifier_pool.verify_balanced.remote(modified_sample))
+        # logging.debug(f"\033[1;38;2;255;165;0mFirst sample after generating with rewritten input: \033[0m {modified_samples[0]['sample_text']}")
         
         samples = await asyncio.gather(*sample_rewards_futures)
         
-        modified_samples = await asyncio.gather(*modified_rewards_futures)
-        for s in modified_samples:
-            s['modified_reward'] = s['reward']
+        # modified_samples = await asyncio.gather(*modified_rewards_futures)
+        # for s in modified_samples:
+        #     s['modified_reward'] = s['reward']
         
-        samples = modified_samples + samples
+        # samples = modified_samples + samples
         
         group_rewards = np.array([s['reward'] for s in samples])
+        max_reward = np.max(group_rewards).item()
         group_advantages = normalize_rewards(group_rewards)
         for sample_, advantage in zip(samples, group_advantages):
             sample_['advantage'] = advantage.item()
-        
+            sample_['max_reward_in_group'] = max_reward
         print(f"\033[38;5;201mWorker \033[0m {self.worker_id} \033[38;5;201mfinished inference with \033[0m {len(samples)} samples.")
         return samples
 
