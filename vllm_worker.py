@@ -156,11 +156,14 @@ class BaseVLLMWorker:
         except Exception as e:
             print(f"Error during registration for worker {self.worker_id}: {e}")
     
-    def update_weights(self, new_state_dict: dict):
+    # def update_weights(self, new_state_dict: dict):
+    #     llm_model = self.llm.engine.model_executor.driver_worker.model_runner.model
+    #     llm_model.load_weights(new_state_dict.items())
+    #     print(f"vLLM weights updated successfully on service {self.worker_id}.")
+    #     return True
+    def _update_weight(self, name, weight):
         llm_model = self.llm.engine.model_executor.driver_worker.model_runner.model
-        llm_model.load_weights(new_state_dict.items())
-        print(f"vLLM weights updated successfully on service {self.worker_id}.")
-        return True
+        llm_model.load_weights(weights=[(name, weight)])
     
     async def inference(self, sample: dict, **kwargs) -> list[dict]:
         """
@@ -193,8 +196,48 @@ class BaseVLLMWorker:
             traceback.print_exc()
             raise e
 
+# inspired by https://github.com/vllm-project/vllm/blob/82e7e19a6e00bb1c730c29817305aa37ad587210/examples/offline_inference/rlhf_utils.py
+import torch
+
+def stateless_init_process_group(master_address, master_port, rank, world_size,
+                                 device):
+    """
+    vLLM provides `StatelessProcessGroup` to create a process group
+    without considering the global process group in torch.distributed.
+    It is recommended to create `StatelessProcessGroup`, and then initialize
+    the data-plane communication (NCCL) between external (train processes) 
+    and vLLM workers.
+    """
+    from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
+    from vllm.distributed.utils import StatelessProcessGroup
+    pg = StatelessProcessGroup.create(host=master_address,
+                                      port=master_port,
+                                      rank=rank,
+                                      world_size=world_size)
+    pynccl = PyNcclCommunicator(pg, device=device)
+    return pynccl
+
+class WorkerNCCLSync:
+    def init_weight_update_group(self, master_address, master_port, world_size, rank):
+        self.model_update_group = stateless_init_process_group(
+            master_address, 
+            master_port, 
+            rank, 
+            world_size, 
+            self.llm.engine.model_executor.driver_worker.worker.device,
+        )
+
+    def update_weight(self, name, dtype, shape):
+        weight = torch.empty(shape, dtype=dtype, device="cuda")
+        self.model_update_group.broadcast(weight, 
+                                          src=0, 
+                                          stream=torch.cuda.current_stream())
+        self._update_weight(name, weight)
+        del weight
+
+
 @ray.remote
-class GenerationVLLMWorker(BaseVLLMWorker):
+class GenerationVLLMWorker(BaseVLLMWorker, WorkerNCCLSync):
     def __init__(self, model_path: str, worker_id: str, tensor_parallel_size: int, max_num_seqs: int,
                  global_num_verifiers: int = 4, write_failed: bool = False, overhead_seqs: int = 8):
         # Pass the common parameters to the base initializer.
