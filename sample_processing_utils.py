@@ -176,6 +176,7 @@ def post_process_batch(batched_questions, device, constant_length_samples=None):
         "advantages": advantages.contiguous(),
         "reference_output_logprobs": reference_output_logprobs.contiguous(),
         "output_lens_broadcasted": output_lens_broadcasted.contiguous(),
+        "num_output_tokens_non_masked": torch.tensor((labels != -100).sum(), device=device, dtype=torch.float32),
         "num_output_tokens": torch.tensor(output_lens.sum(), device=device, dtype=torch.float32),
         "num_samples": torch.tensor(len(batched_questions), device=device, dtype=torch.float32),
         "max_reward_in_group": torch.tensor(sum([s['max_reward_in_group'] for s in batched_questions]), device=device, dtype=torch.float32),

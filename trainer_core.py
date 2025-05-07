@@ -243,6 +243,7 @@ async def train(args,
                 # Accumulate metrics in the Metrics instance
                 batch_totals.accumulate_minibatch_metrics(
                     output_tokens = minibatch["num_output_tokens"],
+                    non_masked_output_tokens = minibatch["num_output_tokens_non_masked"],
                     samples = minibatch["num_samples"],
                     reward = minibatch["total_reward_rank"],
                     modified_reward = minibatch["total_modified_reward"],
@@ -268,7 +269,7 @@ async def train(args,
             batch_num_samples = bm["samples"]
             total_samples_accumulated += batch_num_samples
             # we multiply by 4000 and divide by the number of output tokens, which makes the loss a per-token loss.
-            grad_norm = take_gradient_step(policy_model, optimizer, lr_scheduler, accelerator, int(4000)/bm['output_tokens'])
+            grad_norm = take_gradient_step(policy_model, optimizer, lr_scheduler, accelerator, int(4000)/bm['non_masked_output_tokens'])
 
             if accelerator.is_main_process:
                 batch_time = time.time() - start_time
@@ -279,10 +280,10 @@ async def train(args,
                     "samples_in_batch": batch_num_samples,
                     "avg_reward": bm['reward']/batch_num_samples,
                     "avg_output_tokens": bm['output_tokens']/batch_num_samples,
-                    "avg_loss": bm['loss']/batch_num_samples,
+                    "avg_loss": bm['loss']/bm['non_masked_output_tokens'],
                     "lr": lr_scheduler.get_last_lr()[0],
-                    "avg_pg_loss": bm['pg_loss']/batch_num_samples,
-                    "avg_kl_div": bm['kl_div']/batch_num_samples,
+                    "avg_pg_loss": bm['pg_loss']/bm['non_masked_output_tokens'],
+                    "avg_kl_div": bm['kl_div']/bm['non_masked_output_tokens'],
                     "avg_modified_reward": bm['modified_reward']/(bm['modified_samples']+1e-6),
                     "num_modified_samples": bm['modified_samples'],
                     "avg_delimiter_not_found": bm['delimiter_not_found']/(bm['modified_samples']+1e-6),
