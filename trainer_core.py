@@ -291,6 +291,8 @@ async def train(args,
                     pg_clip=metrics["pg_clip"],
                     advantage_is_zero=mb["advantage_is_zero"],
                     truncated_sample=mb["truncated_sample"],
+                    maj_ratio=mb["maj_ratio"],
+                    true_reward=mb["true_reward"],
                 )
                 num_microbatches_in_minibatch += 1
                 print(f"\033[1;38;2;255;165;0mNum microbatches in minibatch:\033[0m {num_microbatches_in_minibatch} \033[1;38;2;255;165;0mRank:\033[0m {rank}")
@@ -316,6 +318,8 @@ async def train(args,
                         "total_samples_accumulated": total_samples_accumulated,
                         "samples_in_batch": bm["samples"],
                         "avg_reward": bm["reward"] / bm["samples"],
+                        "avg_true_reward": bm["true_reward"] / bm["samples"],
+                        "avg_maj_ratio": bm["maj_ratio"] / bm["samples"],
                         "avg_output_tokens": bm["output_tokens"] / bm["samples"],
                         "total_non_masked_tokens": total_non_masked_tokens,
                         "num_non_masked_tokens": bm["non_masked_output_tokens"],

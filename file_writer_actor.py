@@ -19,6 +19,9 @@ class FileWriterActor:
         dirpath = os.path.dirname(self.file_path)
         if dirpath and not os.path.exists(dirpath):
             os.makedirs(dirpath, exist_ok=True)
+        # Open file descriptor for faster writes
+        self._f = open(self.file_path, 'a')
+        self._write_count = 0
 
     def append(self, record: dict, timestamp: bool = False, print_console: bool = False):
         """
@@ -36,12 +39,25 @@ class FileWriterActor:
             elif isinstance(v, np.generic):
                 record[k] = v.item()
         line = json.dumps(record, separators=(',', ':'), ensure_ascii=False) + '\n'
-        # Actor execution is single-threaded per actor, so no explicit lock needed
-        with open(self.file_path, 'a') as f:
-            f.write(line)
+        # Write to open file descriptor
+        self._f.write(line)
+        self._write_count += 1
+        # Flush and restart file descriptor after every 1000 records
+        if self._write_count >= 1000:
+            self._f.flush()
+            self._f.close()
+            self._f = open(self.file_path, 'a')
+            self._write_count = 0
         # Optional console output
         if print_console:
             print(f"\033[92m{json.dumps(record, indent=4)}\033[0m")
+
+    def __del__(self):
+        # Ensure file descriptor is closed on deletion
+        try:
+            self._f.close()
+        except Exception:
+            pass
 
 
 def get_or_create_filewriter(actor_name: str, file_path: str):

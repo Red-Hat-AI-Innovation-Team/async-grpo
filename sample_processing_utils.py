@@ -137,6 +137,8 @@ def make_dummy_batch(batched_questions, device):
         "total_reward_rank": torch.tensor(0.0, device=device, dtype=torch.float32),
         "truncated_sample": torch.tensor(0.0, device=device, dtype=torch.float32),
         "advantage_is_zero": torch.tensor(0.0, device=device, dtype=torch.float32),
+        "true_reward": torch.tensor(0.0, device=device, dtype=torch.float32),
+        "maj_ratio": torch.tensor(0.0, device=device, dtype=torch.float32),
     }
 
 def post_process_batch(batched_questions, device, constant_length_samples=None):
@@ -226,4 +228,6 @@ def post_process_batch(batched_questions, device, constant_length_samples=None):
         "total_reward_rank": torch.tensor(sum([s['reward'] for s in batched_questions]), device=device, dtype=torch.float32),
         "truncated_sample": torch.tensor(sum([s['truncated_sample'] for s in batched_questions]), device=device, dtype=torch.float32),
         "advantage_is_zero": torch.tensor(sum([s['advantage_is_zero'] for s in batched_questions]), device=device, dtype=torch.float32),
+        "true_reward": torch.tensor(sum([s.get('true_reward', 0.0) for s in batched_questions]), device=device, dtype=torch.float32),
+        "maj_ratio": torch.tensor(sum([s.get('maj_ratio', 0.0) for s in batched_questions]), device=device, dtype=torch.float32),
     } 

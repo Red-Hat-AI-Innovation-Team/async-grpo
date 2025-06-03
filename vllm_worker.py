@@ -261,8 +261,8 @@ class GenerationVLLMWorker(BaseVLLMWorker):
             sample['input_len'] = len(sample['input_token_ids'])
         
         samples = [deepcopy(sample) for _ in range(len(request_out.outputs))]
-        
-        sample_extract_answer_futures = []
+                
+        samples_futures = []
         for sample, out in zip(samples, request_out.outputs):
             sample['modified_reward'] = None
             sample['delimiter_not_found'] = False
@@ -281,20 +281,33 @@ class GenerationVLLMWorker(BaseVLLMWorker):
             sample['labels'] = labels
             sample['num_non_masked_output_tokens'] = sum(1 for label in labels if label != -100)
             # Use the remote call because verifier_pool is now a ray actor
-            sample_extract_answer_futures.append(
+            samples_futures.append(
                 self.verifier_pool.verify.remote(
                     sample,
-                    max_gen_length=kwargs.get("max_tokens", self.engine_args.max_model_len),
                     reward_fns=[RewardType.TTRL_EXTRACT_ANSWER]
                 )
             )
+        # Start Generation Here
+        # import json
+        # from pathlib import Path
+        # try:
+        #     import hashlib
+        #     hash_digest = hashlib.md5(json.dumps(samples, sort_keys=True).encode('utf-8')).hexdigest()
+        #     debug_file = Path(__file__).parent / f"debug_samples_{hash_digest}.jsonl"
+        #     with open(debug_file, "a") as debug_f:
+        #         for s in samples:
+        #             debug_f.write(json.dumps(s) + "\n")
+        # except Exception as e:
+        #     logging.error(f"Failed to write debug samples: {e}")
+        # End Generation Her
+
         logging.debug(f"\033[1;38;2;255;165;0mFirst sample before rewriting: \033[0m {samples[0]['sample_text']}")
-        sample_extract_answer_results = await asyncio.gather(*sample_extract_answer_futures)
-        samples = majority_vote(sample_extract_answer_results)
-        sample_rewards_futures = []
-        for sample, extract_answer_result in zip(samples, sample_extract_answer_results):
-            sample['parsed_attempt'] = extract_answer_result['parsed_attempt']
-            sample_rewards_futures.append(
+        samples = await asyncio.gather(*samples_futures)
+        samples = majority_vote(samples)
+
+        samples_futures = []
+        for sample in samples:
+            samples_futures.append(
                 self.verifier_pool.verify.remote(
                     sample,
                     max_gen_length=kwargs.get("max_tokens", self.engine_args.max_model_len),
@@ -340,19 +353,19 @@ class GenerationVLLMWorker(BaseVLLMWorker):
         #         s['modified_reward'] = s['reward']
         #     final_samples = modified_results + (await asyncio.gather(*sample_rewards_futures))
         # else:
-        final_samples = await asyncio.gather(*sample_rewards_futures)
+        samples = await asyncio.gather(*samples_futures)
 
         
-        group_rewards = np.array([s['reward'] for s in final_samples])
+        group_rewards = np.array([s['reward'] for s in samples])
         max_reward = np.max(group_rewards).item()
         group_advantages = normalize_rewards(group_rewards)
-        for sample_, advantage in zip(final_samples, group_advantages):
+        for sample_, advantage in zip(samples, group_advantages):
             sample_['advantage'] = advantage.item()
             sample_['max_reward_in_group'] = max_reward
             sample_['advantage_is_zero'] = advantage == 0
         
-        print(f"\033[38;5;201mWorker \033[0m {self.worker_id} \033[38;5;201mfinished inference with \033[0m {len(final_samples)} samples.")
-        return final_samples
+        print(f"\033[38;5;201mWorker \033[0m {self.worker_id} \033[38;5;201mfinished inference with \033[0m {len(samples)} samples.")
+        return samples
 
 
 if __name__ == "__main__":

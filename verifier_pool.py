@@ -15,7 +15,7 @@ from wrapt_timeout_decorator import timeout
 from utils import patch_target_module
 from functools import partial
 from reward_registry import get_reward_adapter, RewardType
-patch_target_module("math_verify.utils.timeout", partial(timeout, use_signals=False))
+# patch_target_module("math_verify.utils.timeout", partial(timeout, use_signals=False))
 
 import numpy as np
 logging.getLogger().setLevel(logging.DEBUG)
@@ -143,6 +143,7 @@ class VerifierPool:
     async def verify(self, sample: dict, **kwargs) -> dict:
         """Verify using the configured reward functions list."""
         fn_list = kwargs.get('reward_fns', self.reward_fns)
+        print(f"\033[38;5;196m\033[1m DEBUG: VerifierPool reward_fns: {fn_list}\033[0m", flush=True)
         tasks = [
             asyncio.create_task(
                 self._verify_single(deepcopy(sample), fn, **kwargs)
@@ -174,13 +175,17 @@ if __name__ == '__main__':
     pool = get_or_create_verifier_pool(global_num_verifiers=1, write_failed=True, reward_fns=[RewardType.COUNTDOWN], output_dir=None)
 
     # Define a sample for countdown task
-    with open("/new_data/experiments_rh/countdown_grpo_qwen3b/sample.json", "r") as f:
-        sample = json.load(f)
-    sample['sample_text'] = "<|im_start|>system\nYou are a helpful assistant. You first think about the reasoning process in your mind and then provide the user with the answer.<|im_end|>\n<|im_start|>user\nUsing the numbers [91, 65, 3], create an equation that equals 23. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once. Show your work in <think> </think> tags. And return the final answer in <answer> </answer> tags, for example <answer> (1 + 2) / 3 </answer>.<|im_end|>\n<|im_start|>assistant\nLet me solve this step by step.\n<think> We need to use the numbers 91, 65, and 3 only once to form an equation that equals 23. One way to approach this is to consider the operations and their effects on the numbers. The number 91 is quite large and 65 is also quite large, so subtracting or dividing might not be the best approach. The number 3 seems more manageable. A possible strategy is to think of a way to reduce the value of 91 and 65 to 23 using basic arithmetic. One way to do this is by combining them in a specific way after applying an operation to one of them. </think>\n<answer> (91 - 65) - 3 </answer><|im_end|>"
-    sample['end_token'] = "<|im_end|>"
+
+    with open("/workspace/home/lab/async-grpo/debug_samples_5e13be8310b0eb4b4d7149d09b4ed5dd.jsonl", "r") as f:
+        samples = [json.loads(line) for line in f]
+
+    # sample['sample_text'] = "<|im_start|>system\nYou are a helpful assistant. You first think about the reasoning process in your mind and then provide the user with the answer.<|im_end|>\n<|im_start|>user\nUsing the numbers [91, 65, 3], create an equation that equals 23. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once. Show your work in <think> </think> tags. And return the final answer in <answer> </answer> tags, for example <answer> (1 + 2) / 3 </answer>.<|im_end|>\n<|im_start|>assistant\nLet me solve this step by step.\n<think> We need to use the numbers 91, 65, and 3 only once to form an equation that equals 23. One way to approach this is to consider the operations and their effects on the numbers. The number 91 is quite large and 65 is also quite large, so subtracting or dividing might not be the best approach. The number 3 seems more manageable. A possible strategy is to think of a way to reduce the value of 91 and 65 to 23 using basic arithmetic. One way to do this is by combining them in a specific way after applying an operation to one of them. </think>\n<answer> (91 - 65) - 3 </answer><|im_end|>"
+    # sample['end_token'] = "<|im_end|>"
 
     # Invoke the countdown reward adapter via the verifier pool
-    result = ray.get(pool.verify.remote(sample))
+    result = ray.get(pool.verify.remote(samples[0], reward_fns=[RewardType.TTRL_EXTRACT_ANSWER]))
+
+    result2 = ray.get(pool.verify.remote(result, reward_fns=[RewardType.TTRL_REWARD]))
 
     # print('Debugger result:', result)
     from IPython import embed; embed()
