@@ -142,10 +142,11 @@ class VerifierPool:
 
     async def verify(self, sample: dict, **kwargs) -> dict:
         """Verify using the configured reward functions list."""
+        fn_list = kwargs.get('reward_fns', self.reward_fns)
         tasks = [
             asyncio.create_task(
                 self._verify_single(deepcopy(sample), fn, **kwargs)
-            ) for fn in self.reward_fns
+            ) for fn in fn_list
         ]
         results = await asyncio.gather(*tasks)
         # print(f'\033[38;5;196m\033[1m DEBUG: Results: {results[0]["reward"]}\033[0m', flush=True)

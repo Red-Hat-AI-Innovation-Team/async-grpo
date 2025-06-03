@@ -1,4 +1,5 @@
 import argparse
+from collections import Counter
 from copy import deepcopy
 from functools import partial
 from hashlib import sha256
@@ -193,6 +194,18 @@ class BaseVLLMWorker:
             import traceback
             traceback.print_exc()
             raise e
+        
+def majority_vote(samples: list[dict]) -> list[dict]:
+    """
+    Get the majority vote answer from the samples.
+    """
+    maj_vote_answer = [sample.get('parsed_attempt', None) for sample in samples if sample.get('parsed_attempt', None) is not None]
+    estimated_label, majority_count = Counter(maj_vote_answer).most_common(1)[0]
+    for s in samples:
+        s['maj_vote_answer'] = estimated_label
+        s['maj_ratio'] = majority_count / len(samples)
+    return samples
+
 
 @ray.remote
 class GenerationVLLMWorker(BaseVLLMWorker):
@@ -249,7 +262,7 @@ class GenerationVLLMWorker(BaseVLLMWorker):
         
         samples = [deepcopy(sample) for _ in range(len(request_out.outputs))]
         
-        sample_rewards_futures = []
+        sample_extract_answer_futures = []
         for sample, out in zip(samples, request_out.outputs):
             sample['modified_reward'] = None
             sample['delimiter_not_found'] = False
@@ -268,53 +281,67 @@ class GenerationVLLMWorker(BaseVLLMWorker):
             sample['labels'] = labels
             sample['num_non_masked_output_tokens'] = sum(1 for label in labels if label != -100)
             # Use the remote call because verifier_pool is now a ray actor
-            sample_rewards_futures.append(
+            sample_extract_answer_futures.append(
                 self.verifier_pool.verify.remote(
                     sample,
-                    max_gen_length=kwargs.get("max_tokens", self.engine_args.max_model_len)
+                    max_gen_length=kwargs.get("max_tokens", self.engine_args.max_model_len),
+                    reward_fns=[RewardType.TTRL_EXTRACT_ANSWER]
                 )
             )
         logging.debug(f"\033[1;38;2;255;165;0mFirst sample before rewriting: \033[0m {samples[0]['sample_text']}")
-
-        if insert_reasoning_phrases:
-            modified_samples = [deepcopy(sample) for sample in samples]
-            modified_samples = await asyncio.gather(*[rewrite_with_insert_phrase(sample, self.tokenizer) for sample in modified_samples])
-            logging.debug(f"\033[1;38;2;255;165;0mFirst sample after rewriting: \033[0m {modified_samples[0]['input']}")
-            
-            kwargs['n'] = 1
-            modified_requests_out = await asyncio.gather(*[
-                super().inference(s, **self.get_gen_kwargs(s, include_stop_str_in_output=False, **kwargs)) 
-                for s in modified_samples
-            ])
-            modified_rewards_futures = []
-            for modified_sample, sample, out in zip(modified_samples, samples, modified_requests_out):
-                modified_sample['input'] = sample['input']  # original input
-                modified_sample['sample_ids'] = modified_sample['input_token_ids'] + list(out.outputs[0].token_ids)
-                modified_sample['input_token_ids'] = sample['input_token_ids']  # original input token ids
-                modified_sample['output_token_ids'] = modified_sample['sample_ids'][len(modified_sample['input_token_ids']):]
-                modified_sample['output_len'] = len(modified_sample['output_token_ids'])
-                modified_sample['sample_text'] = self.tokenizer.decode(modified_sample['sample_ids'])
-                modified_sample['sample_position_ids'] = list(range(len(modified_sample['sample_ids'])))
-                # Compute per-sample labels for logprobs
-                labels = [-100] * len(modified_sample['sample_ids'])
-                if not modified_sample['truncated_sample']:
-                    for i in range(modified_sample['output_len']):
-                        pos = modified_sample['input_len'] + i
-                        labels[pos] = modified_sample['sample_ids'][pos]
-                modified_sample['labels'] = labels
-                modified_rewards_futures.append(
-                    self.verifier_pool.verify.remote(
-                        modified_sample,
-                        max_gen_length=kwargs.get("max_tokens", self.engine_args.max_model_len)
-                    )
+        sample_extract_answer_results = await asyncio.gather(*sample_extract_answer_futures)
+        samples = majority_vote(sample_extract_answer_results)
+        sample_rewards_futures = []
+        for sample, extract_answer_result in zip(samples, sample_extract_answer_results):
+            sample['parsed_attempt'] = extract_answer_result['parsed_attempt']
+            sample_rewards_futures.append(
+                self.verifier_pool.verify.remote(
+                    sample,
+                    max_gen_length=kwargs.get("max_tokens", self.engine_args.max_model_len),
+                    reward_fns=[RewardType.TTRL_REWARD]
                 )
-            logging.debug(f"\033[1;38;2;255;165;0mFirst sample after generating with rewritten input: \033[0m {modified_samples[0]['sample_text']}")
-            modified_results = await asyncio.gather(*modified_rewards_futures)
-            for s in modified_results:
-                s['modified_reward'] = s['reward']
-            final_samples = modified_results + (await asyncio.gather(*sample_rewards_futures))
-        else:
-            final_samples = await asyncio.gather(*sample_rewards_futures)
+            )
+
+        # if insert_reasoning_phrases:
+        #     modified_samples = [deepcopy(sample) for sample in samples]
+        #     modified_samples = await asyncio.gather(*[rewrite_with_insert_phrase(sample, self.tokenizer) for sample in modified_samples])
+        #     logging.debug(f"\033[1;38;2;255;165;0mFirst sample after rewriting: \033[0m {modified_samples[0]['input']}")
+            
+        #     kwargs['n'] = 1
+        #     modified_requests_out = await asyncio.gather(*[
+        #         super().inference(s, **self.get_gen_kwargs(s, include_stop_str_in_output=False, **kwargs)) 
+        #         for s in modified_samples
+        #     ])
+        #     modified_rewards_futures = []
+        #     for modified_sample, sample, out in zip(modified_samples, samples, modified_requests_out):
+        #         modified_sample['input'] = sample['input']  # original input
+        #         modified_sample['sample_ids'] = modified_sample['input_token_ids'] + list(out.outputs[0].token_ids)
+        #         modified_sample['input_token_ids'] = sample['input_token_ids']  # original input token ids
+        #         modified_sample['output_token_ids'] = modified_sample['sample_ids'][len(modified_sample['input_token_ids']):]
+        #         modified_sample['output_len'] = len(modified_sample['output_token_ids'])
+        #         modified_sample['sample_text'] = self.tokenizer.decode(modified_sample['sample_ids'])
+        #         modified_sample['sample_position_ids'] = list(range(len(modified_sample['sample_ids'])))
+        #         # Compute per-sample labels for logprobs
+        #         labels = [-100] * len(modified_sample['sample_ids'])
+        #         if not modified_sample['truncated_sample']:
+        #             for i in range(modified_sample['output_len']):
+        #                 pos = modified_sample['input_len'] + i
+        #                 labels[pos] = modified_sample['sample_ids'][pos]
+        #         modified_sample['labels'] = labels
+        #         modified_rewards_futures.append(
+        #             self.verifier_pool.verify.remote(
+        #                 modified_sample,
+        #                 max_gen_length=kwargs.get("max_tokens", self.engine_args.max_model_len)
+        #             )
+        #         )
+        #     logging.debug(f"\033[1;38;2;255;165;0mFirst sample after generating with rewritten input: \033[0m {modified_samples[0]['sample_text']}")
+        #     modified_results = await asyncio.gather(*modified_rewards_futures)
+        #     for s in modified_results:
+        #         s['modified_reward'] = s['reward']
+        #     final_samples = modified_results + (await asyncio.gather(*sample_rewards_futures))
+        # else:
+        final_samples = await asyncio.gather(*sample_rewards_futures)
+
         
         group_rewards = np.array([s['reward'] for s in final_samples])
         max_reward = np.max(group_rewards).item()

@@ -1,6 +1,6 @@
 --extra-index-url https://wheels.vllm.ai/nightly  # No --pre needed
 vllm
-math-verify[antlr4_13_2]
+# math-verify[antlr4_13_2]
 ray[default]==2.44.1
 rich
 wrapt_timeout_decorator
